@@ -889,11 +889,8 @@ func (r *DefaultRuleRenderer) StaticNATPostroutingChains(ipVersion uint8) []*Cha
 	if ipVersion == 4 && r.IPIPEnabled && len(r.IPIPTunnelAddress) > 0 {
 		tunnelIfaces = append(tunnelIfaces, "tunl0")
 	}
-	if ipVersion == 4 && r.VXLANEnabled && len(r.VXLANTunnelAddress) > 0 {
+	if ipVersion == 6 && r.VXLANEnabledV6 && r.VXLANEnabled && len(r.VXLANTunnelAddressV6) > 0 {
 		tunnelIfaces = append(tunnelIfaces, "vxlan.calico")
-	}
-	if ipVersion == 6 && r.VXLANEnabledV6 && len(r.VXLANTunnelAddressV6) > 0 {
-		tunnelIfaces = append(tunnelIfaces, "vxlan-v6.calico")
 	}
 	if ipVersion == 4 && r.WireguardEnabled && len(r.WireguardInterfaceName) > 0 {
 		// Wireguard is assigned an IP dynamically and without restarting Felix. Just add the interface if we have

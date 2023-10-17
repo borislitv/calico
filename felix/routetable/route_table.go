@@ -582,7 +582,7 @@ func (r *RouteTable) Apply() error {
 			// Handle errors from syncing either L2 or L3 routes.
 			switch err {
 			case nil:
-				logCxt.Debug("Synchronised routes on interface")
+				logCxt.Info("Synchronised routes on interface")
 				delete(r.ifaceNameToUpdateType, ifaceName)
 				continue ifaceLoop
 			case IfaceNotPresent:
@@ -629,8 +629,6 @@ func (r *RouteTable) syncRoutesForLink(ifaceName string, fullSync bool, firstTry
 		perIfaceSyncTime.Observe(r.time.Since(startTime).Seconds())
 	}()
 	logCxt := r.logCxt.WithField("ifaceName", ifaceName)
-	logCxt.Debug("Syncing interface routes")
-
 	// Any deleted route that is not being replaced by a route with the same CIDR should have the corresponding
 	// conntrack entry removed.
 	deletedConnCIDRs := set.NewBoxed[ip.CIDR]()
@@ -652,9 +650,10 @@ func (r *RouteTable) syncRoutesForLink(ifaceName string, fullSync bool, firstTry
 	var routesToDelete []netlink.Route
 	updatesFailed := false
 	var resyncErr error
+
 	if fullSync {
 		// Performing a full re-sync.  Start by applying the deltas so that we don't delete routes that are required.
-		logCxt.Debug("Reconcile against kernel programming")
+		logCxt.Info("Reconcile against kernel programming")
 		_, _ = r.applyRouteDeltas(ifaceName, deletedConnCIDRs)
 
 		// Now do the resync - this will update our deltas again based on what is not programmed (it's a little bit
@@ -718,16 +717,17 @@ func (r *RouteTable) syncRoutesForLink(ifaceName string, fullSync bool, firstTry
 		r.waitForPendingConntrackDeletion(target.CIDR.Addr())
 		if err := nl.RouteAdd(&route); err != nil {
 			if firstTry {
-				logCxt.WithError(err).WithField("route", route).Debug("Failed to add route on first attempt, retrying...")
+				logCxt.WithError(err).WithField("route", route).Info("Failed to add route on first attempt, retrying...")
 			} else {
 				logCxt.WithError(err).WithField("route", route).Warn("Failed to add route")
 			}
 			updatesFailed = true
 		} else {
-			logCxt.WithField("route", route).Debug("Added route")
+			logCxt.WithField("route", route).Info("Added route")
 		}
 		if r.ipVersion == 4 && target.DestMAC != nil {
 			// TODO(smc) clean up/sync old ARP entries
+			r.logCxt.Infof("try to add ARP for %v %v %v", target.CIDR, target.DestMAC, ifaceName)
 			err := r.addStaticARPEntry(target.CIDR, target.DestMAC, ifaceName)
 			if err != nil {
 				logCxt.WithError(err).Warn("Failed to set ARP entry")
@@ -848,7 +848,7 @@ func (r *RouteTable) fullResyncRoutesForLink(logCxt *log.Entry, ifaceName string
 	alreadyCorrectCIDRs := set.NewBoxed[ip.CIDR]()
 	leaveDirty := false
 	for _, route := range programmedRoutes {
-		logCxt.Debugf("Processing route: %v %v %v", route.Table, route.LinkIndex, route.Dst)
+		logCxt.Infof("Processing route: %v %v %v", route.Table, route.LinkIndex, route.Dst)
 		var dest ip.CIDR
 		if route.Dst != nil {
 			dest = ip.CIDRFromIPNet(route.Dst)
@@ -856,7 +856,7 @@ func (r *RouteTable) fullResyncRoutesForLink(logCxt *log.Entry, ifaceName string
 		logCxt := logCxt.WithField("dest", dest)
 		// Check if we should remove routes not added by us
 		if !r.removeExternalRoutes && route.Protocol != r.deviceRouteProtocol {
-			logCxt.Debug("Syncing routes: not removing route as it is not marked as Felix route")
+			logCxt.Info("Syncing routes: not removing route as it is not marked as Felix route")
 			continue
 		}
 
@@ -883,7 +883,7 @@ func (r *RouteTable) fullResyncRoutesForLink(logCxt *log.Entry, ifaceName string
 			}
 		}
 		if len(routeProblems) == 0 {
-			logCxt.Debug("Route is correct")
+			logCxt.Info("Route is correct")
 			alreadyCorrectCIDRs.Add(dest)
 			continue
 		}
@@ -998,9 +998,10 @@ func (r *RouteTable) readProgrammedRoutes(logCxt *log.Entry, ifaceName string) (
 
 func (r *RouteTable) syncL2RoutesForLink(ifaceName string) error {
 	logCxt := r.logCxt.WithField("ifaceName", ifaceName)
-	logCxt.Debug("Syncing interface L2 routes")
+	logCxt.Info("Syncing interface L2 routes")
+
 	if updatedTargets, ok := r.pendingIfaceNameToL2Targets[ifaceName]; ok {
-		logCxt.Debug("Have updated targets.")
+		logCxt.Info("Have updated targets.")
 		if updatedTargets == nil {
 			delete(r.ifaceNameToL2Targets, ifaceName)
 		} else {
@@ -1009,6 +1010,25 @@ func (r *RouteTable) syncL2RoutesForLink(ifaceName string) error {
 		delete(r.pendingIfaceNameToL2Targets, ifaceName)
 	}
 	expectedTargets := r.ifaceNameToL2Targets[ifaceName]
+	if r.ipVersion == 4 {
+		for _, target := range r.ifaceNameToTargets[ifaceName] {
+			logCxt.Infof("target in syncL2RoutesForLink by Boris: %v with ipversion: %v and mac: %v", target, r.ipVersion, target.DestMAC)
+			// TODO(smc) clean up/sync old ARP entries
+			r.livenessCallback()
+			for _, t := range expectedTargets {
+				if t.GW == target.CIDR.Addr() {
+					m := t.VTEPMAC
+					r.logCxt.Infof("try to add ARP for %v %v %v", target.CIDR, m, ifaceName)
+					err := r.addStaticARPEntry(target.CIDR, m, ifaceName)
+					if err != nil {
+						logCxt.WithError(err).Warn("Failed to set ARP entry")
+					}
+					break
+				}
+			}
+		}
+		return nil
+	}
 
 	// Try to get the link attributes.  This may fail if it's been deleted out from under us.
 	linkAttrs, err := r.getLinkAttributes(ifaceName)
@@ -1037,11 +1057,11 @@ func (r *RouteTable) syncL2RoutesForLink(ifaceName string) error {
 
 	for _, existing := range existingNeigh {
 		if existing.HardwareAddr == nil {
-			log.WithField("neighbor", existing).Debug("Ignoring existing ARP entry with no hardware addr")
+			log.WithField("neighbor", existing).Info("Ignoring existing ARP entry with no hardware addr")
 			continue
 		}
 		if _, ok := expected[existing.HardwareAddr.String()]; !ok {
-			logCxt.WithField("neighbor", existing).Debug("Neighbor should no longer be programmed")
+			logCxt.WithField("neighbor", existing).Info("Neighbor should no longer be programmed")
 
 			// Remove the FDB entry for this neighbor.
 			n := netlink.Neigh{

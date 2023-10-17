@@ -3973,7 +3973,7 @@ func (m *VXLANTunnelEndpointUpdate) GetNode() string {
 
 func (m *VXLANTunnelEndpointUpdate) GetMac() string {
 	if m != nil {
-		return m.Mac
+		return m.MacV6
 	}
 	return ""
 }

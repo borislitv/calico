@@ -259,8 +259,12 @@ func (m *vxlanManager) OnUpdate(protoBufMsg interface{}) {
 		// Check to make sure that we are dealing with messages of the correct IP version.
 		if (m.ipVersion == 4 && msg.Ipv4Addr == "") || (m.ipVersion == 6 && msg.Ipv6Addr == "") {
 			// Skip since the update is for a mismatched IP version
-			m.logCtx.WithField("msg", msg).Debug("Skipping mismatched IP version update")
+			m.logCtx.WithField("msg", msg).Info("Skipping mismatched IP version update")
 			return
+		}
+		if m.ipVersion == 4 {
+			m.logCtx.Infof("override mac for msg: %v", msg)
+			msg.Mac = msg.MacV6
 		}
 
 		m.logCtx.WithField("msg", msg).Debug("VXLAN data plane received VTEP update")
@@ -536,7 +540,7 @@ func (m *vxlanManager) KeepVXLANDeviceInSync(mtu int, xsumBroken bool, wait time
 	for {
 		localVTEP := m.getLocalVTEP()
 		if localVTEP == nil {
-			m.logCtx.Debug("Missing local VTEP information, retrying...")
+			m.logCtx.Info("Missing local VTEP information, retrying...")
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -557,7 +561,7 @@ func (m *vxlanManager) KeepVXLANDeviceInSync(mtu int, xsumBroken bool, wait time
 			}
 		}
 
-		m.logCtx.WithField("localVTEP", localVTEP).Debug("Configuring VXLAN device")
+		m.logCtx.WithField("localVTEP", localVTEP).Info("Configuring VXLAN device")
 		err := m.configureVXLANDevice(mtu, localVTEP, xsumBroken)
 		if err != nil {
 			m.logCtx.WithError(err).Warn("Failed to configure VXLAN tunnel device, retrying...")
@@ -607,7 +611,7 @@ func (m *vxlanManager) getParentInterface(localVTEP *proto.VXLANTunnelEndpointUp
 func (m *vxlanManager) parseMacForIPVersion(vtep *proto.VXLANTunnelEndpointUpdate) (net.HardwareAddr, error) {
 	switch m.ipVersion {
 	case 4:
-		return net.ParseMAC(vtep.Mac)
+		return net.ParseMAC(vtep.MacV6)
 	case 6:
 		return net.ParseMAC(vtep.MacV6)
 	default:
@@ -618,7 +622,8 @@ func (m *vxlanManager) parseMacForIPVersion(vtep *proto.VXLANTunnelEndpointUpdat
 // configureVXLANDevice ensures the VXLAN tunnel device is up and configured correctly.
 func (m *vxlanManager) configureVXLANDevice(mtu int, localVTEP *proto.VXLANTunnelEndpointUpdate, xsumBroken bool) error {
 	logCtx := m.logCtx.WithFields(logrus.Fields{"device": m.vxlanDevice})
-	logCtx.Debug("Configuring VXLAN tunnel device")
+	logCtx.Info("Configuring VXLAN tunnel device")
+
 	parent, err := m.getParentInterface(localVTEP)
 	if err != nil {
 		return err
@@ -648,6 +653,10 @@ func (m *vxlanManager) configureVXLANDevice(mtu int, localVTEP *proto.VXLANTunne
 	link, err := m.nlHandle.LinkByName(m.vxlanDevice)
 	if err != nil {
 		m.logCtx.WithError(err).Info("Failed to get VXLAN tunnel device, assuming it isn't present")
+		if m.ipVersion == 4 {
+			logCtx.Info("Do not create VXLAN tunnel device in ipv4 vxlan manager")
+			return nil
+		}
 		if err := m.nlHandle.LinkAdd(vxlan); err == syscall.EEXIST {
 			// Device already exists - likely a race.
 			m.logCtx.Debug("VXLAN device already exists, likely created by someone else.")
@@ -663,19 +672,25 @@ func (m *vxlanManager) configureVXLANDevice(mtu int, localVTEP *proto.VXLANTunne
 		}
 	}
 
+	// Make sure the IP address is configured.
+	if err := m.ensureAddressOnLink(addr, link); err != nil {
+		return fmt.Errorf("failed to ensure address of interface: %s", err)
+	}
+	if m.ipVersion == 4 {
+		logCtx.Info("Do not configure VXLAN tunnel device in ipv4 vxlan manager")
+		return nil
+	}
+
 	// At this point, we have successfully queried the existing device, or made sure it exists if it didn't
 	// already. Check for mismatched configuration. If they don't match, recreate the device.
 	if incompat := vxlanLinksIncompat(vxlan, link); incompat != "" {
 		// Existing device doesn't match desired configuration - delete it and recreate.
 		logrus.Warningf("%q exists with incompatible configuration: %v; recreating device", vxlan.Name, incompat)
-		if err = m.nlHandle.LinkDel(link); err != nil {
-			return fmt.Errorf("failed to delete interface: %v", err)
-		}
+
 		if err = m.nlHandle.LinkAdd(vxlan); err != nil {
 			if err == syscall.EEXIST {
 				logrus.Warnf("Failed to create VXLAN device. Another device with this VNI may already exist")
 			}
-			return fmt.Errorf("failed to create vxlan interface: %v", err)
 		}
 		link, err = m.nlHandle.LinkByName(vxlan.Name)
 		if err != nil {
@@ -693,11 +708,6 @@ func (m *vxlanManager) configureVXLANDevice(mtu int, localVTEP *proto.VXLANTunne
 		} else {
 			logCtx.Info("Updated vxlan tunnel MTU")
 		}
-	}
-
-	// Make sure the IP address is configured.
-	if err := m.ensureAddressOnLink(addr, link); err != nil {
-		return fmt.Errorf("failed to ensure address of interface: %s", err)
 	}
 
 	// If required, disable checksum offload.

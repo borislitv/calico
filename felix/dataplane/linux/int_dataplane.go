@@ -863,7 +863,7 @@ func NewIntDataplaneDriver(config Config) *InternalDataplane {
 			var routeTableVXLANV6 routetable.RouteTableInterface
 			if !config.RouteSyncDisabled {
 				log.Debug("RouteSyncDisabled is false.")
-				routeTableVXLANV6 = routetable.New([]string{"^vxlan-v6.calico$"}, 6, true, config.NetlinkTimeout,
+				routeTableVXLANV6 = routetable.New([]string{"^vxlan.calico$"}, 6, true, config.NetlinkTimeout,
 					config.DeviceRouteSourceAddressIPv6, config.DeviceRouteProtocol, true, unix.RT_TABLE_MAIN,
 					dp.loopSummarizer, featureDetector, routetable.WithLivenessCB(dp.reportHealth))
 			} else {
@@ -874,7 +874,7 @@ func NewIntDataplaneDriver(config Config) *InternalDataplane {
 			vxlanManagerV6 := newVXLANManager(
 				ipSetsV6,
 				routeTableVXLANV6,
-				"vxlan-v6.calico",
+				"vxlan.calico",
 				config,
 				dp.loopSummarizer,
 				6,
@@ -884,7 +884,7 @@ func NewIntDataplaneDriver(config Config) *InternalDataplane {
 			dp.RegisterManager(vxlanManagerV6)
 		} else {
 			// Start a cleanup goroutine not to block felix if it needs to retry
-			go cleanUpVXLANDevice("vxlan-v6.calico")
+			go cleanUpVXLANDevice("vxlan.calico")
 		}
 
 		var routeTableV6 routetable.RouteTableInterface
